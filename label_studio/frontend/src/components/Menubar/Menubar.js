@@ -205,12 +205,6 @@ export const Menubar = ({
                   icon={<LsGitHub/>}
                   target="_blank"
                 />
-                <Menu.Item
-                  label="Slack Community"
-                  href="http://slack.labelstud.io.s3-website-us-east-1.amazonaws.com?source=product-menu"
-                  icon={<LsSlack/>}
-                  target="_blank"
-                />
 
                 <VersionNotifier showCurrentVersion/>
 

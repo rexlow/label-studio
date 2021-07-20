@@ -1,6 +1,24 @@
-IMAGE_NAME=asia.gcr.io/rm-srv-sb/rm-label-studio:latest
+PROJECT=rm-srv-sb
+APP_NAME=rm-label-studio
+IMAGE_NAME=asia.gcr.io/$PROJECT/$APP_NAME:latest
 yes | docker container prune
 docker rmi $IMAGE_NAME
 docker build -t $IMAGE_NAME .
 docker push $IMAGE_NAME
-gcloud run deploy --image $IMAGE_NAME
+gcloud config set project $PROJECT
+gcloud run deploy label-studio \
+    --project=$PROJECT \
+    --platform=managed \
+    --region=asia-southeast1 \
+    --image=$IMAGE_NAME \
+    --set-env-vars DJANGO_DB=default \
+    --set-env-vars LABEL_STUDIO_ONE_CLICK_DEPLOY=1 \
+    --set-env-vars POSTGRE_NAME=${RM_LABEL_STUDIO_DB_NAME} \
+    --set-env-vars POSTGRE_USER=${RM_LABEL_STUDIO_DB_USER} \
+    --set-env-vars POSTGRE_PASSWORD=${RM_LABEL_STUDIO_DB_PASS} \
+    --set-env-vars POSTGRE_PORT=${RM_LABEL_STUDIO_DB_PORT} \
+    --set-env-vars POSTGRE_HOST=${RM_LABEL_STUDIO_DB_HOST} \
+    --set-env-vars LABEL_STUDIO_USERNAME=${RM_LABEL_STUDIO_USERNAME} \
+    --set-env-vars LABEL_STUDIO_PASSWORD=${RM_LABEL_STUDIO_PASSWORD} \
+    --set-env-vars LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true \
+    --allow-unauthenticated

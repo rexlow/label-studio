@@ -201,7 +201,7 @@ export const Menubar = ({
                 />
                 <Menu.Item
                   label="GitHub"
-                  href="https://github.com/heartexlabs/label-studio"
+                  href="https://github.com/rexlow/label-studio"
                   icon={<LsGitHub/>}
                   target="_blank"
                 />

@@ -16,10 +16,10 @@ docker push $IMAGE_NAME
 # deploy to google cloud run
 gcloud config set project $PROJECT
 gcloud run deploy $APP_NAME \
-    --project=$PROJECT \
-    --platform=managed \
-    --region=asia-southeast1 \
-    --image=$IMAGE_NAME \
+    --project $PROJECT \
+    --platform managed \
+    --region asia-southeast1 \
+    --image $IMAGE_NAME \
     --set-env-vars DJANGO_DB=default \
     --set-env-vars LABEL_STUDIO_ONE_CLICK_DEPLOY=1 \
     --set-env-vars POSTGRE_NAME=${RM_LABEL_STUDIO_DB_NAME} \
@@ -30,4 +30,5 @@ gcloud run deploy $APP_NAME \
     --set-env-vars LABEL_STUDIO_USERNAME=${RM_LABEL_STUDIO_USERNAME} \
     --set-env-vars LABEL_STUDIO_PASSWORD=${RM_LABEL_STUDIO_PASSWORD} \
     --set-env-vars LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true \
-    --allow-unauthenticated
+    --allow-unauthenticated \
+    --service-account ${RM_LABEL_STUDIO_SERVICE_ACCOUNT}

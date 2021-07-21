@@ -1,12 +1,21 @@
 PROJECT=rm-srv-sb
 APP_NAME=rm-label-studio
 IMAGE_NAME=asia.gcr.io/$PROJECT/$APP_NAME:latest
+
+# remove previous builds
 yes | docker container prune
 docker rmi $IMAGE_NAME
+
+# only run this if frontend has changed
+# cd label_studio/frontend && npm install && npm run build:production && cd ../..
+
+# build and push
 docker build -t $IMAGE_NAME .
 docker push $IMAGE_NAME
+
+# deploy to google cloud run
 gcloud config set project $PROJECT
-gcloud run deploy label-studio \
+gcloud run deploy $APP_NAME \
     --project=$PROJECT \
     --platform=managed \
     --region=asia-southeast1 \

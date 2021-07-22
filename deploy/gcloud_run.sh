@@ -20,6 +20,8 @@ gcloud run deploy $APP_NAME \
     --platform managed \
     --region asia-southeast1 \
     --image $IMAGE_NAME \
+    --cpu 1 \
+    --max-instances 5 \
     --set-env-vars DJANGO_DB=default \
     --set-env-vars LABEL_STUDIO_ONE_CLICK_DEPLOY=1 \
     --set-env-vars POSTGRE_NAME=${RM_LABEL_STUDIO_DB_NAME} \

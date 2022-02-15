@@ -177,7 +177,7 @@ export const Menubar = ({
                 />
                 <Menu.Item
                   label="Organization"
-                  to="/people"
+                  to="/organization"
                   icon={<IconPersonInCircle/>}
                   data-external
                   exact
@@ -203,6 +203,12 @@ export const Menubar = ({
                   label="GitHub"
                   href="https://github.com/rexlow/label-studio"
                   icon={<LsGitHub/>}
+                  target="_blank"
+                />
+                <Menu.Item
+                  label="Slack Community"
+                  href="https://slack.labelstudio.heartex.com/?source=product-menu"
+                  icon={<LsSlack/>}
                   target="_blank"
                 />
 

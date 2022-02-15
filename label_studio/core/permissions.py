@@ -16,7 +16,6 @@ from rest_framework.permissions import IsAuthenticated, SAFE_METHODS, BasePermis
 from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 
 from core.utils.common import get_object_with_check_and_log
-from users.models import User
 logger = logging.getLogger(__name__)
 
 
@@ -40,6 +39,7 @@ class AllPermissions(BaseModel):
     annotations_delete = 'annotations.delete'
     actions_perform = 'actions.perform'
     predictions_any = 'predictions.any'
+    avatar_any = 'avatar.any'
 
 
 all_permissions = AllPermissions()

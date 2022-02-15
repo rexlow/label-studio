@@ -15,8 +15,9 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 from rest_framework import generics
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import MethodNotAllowed
 
-from core.permissions import all_permissions
+from core.permissions import all_permissions, ViewClassPermission
 from users.models import User
 from users.serializers import UserSerializer
 from users.functions import check_avatar
@@ -31,6 +32,13 @@ logger = logging.getLogger(__name__)
     operation_description="""
     Save details for a specific user, such as their name or contact information, in Label Studio.
     """,
+    manual_parameters=[
+        openapi.Parameter(
+            name='id',
+            type=openapi.TYPE_INTEGER,
+            in_=openapi.IN_PATH,
+            description='User ID'),
+    ],
     request_body=UserSerializer
 ))
 @method_decorator(name='list', decorator=swagger_auto_schema(
@@ -47,7 +55,14 @@ logger = logging.getLogger(__name__)
 @method_decorator(name='retrieve', decorator=swagger_auto_schema(
         tags=['Users'],
         operation_summary='Get user info',
-        operation_description='Get info about a specific Label Studio user, based on the user ID.'
+        operation_description='Get info about a specific Label Studio user, based on the user ID.',
+        manual_parameters = [
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_INTEGER,
+                in_=openapi.IN_PATH,
+                description='User ID'),
+                ],
     ))
 @method_decorator(name='partial_update', decorator=swagger_auto_schema(
         tags=['Users'],
@@ -55,22 +70,43 @@ logger = logging.getLogger(__name__)
         operation_description="""
         Update details for a specific user, such as their name or contact information, in Label Studio.
         """,
+        manual_parameters=[
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_INTEGER,
+                in_=openapi.IN_PATH,
+                description='User ID'),
+        ],
         request_body=UserSerializer
     ))
 @method_decorator(name='destroy', decorator=swagger_auto_schema(
         tags=['Users'],
         operation_summary='Delete user',
         operation_description='Delete a specific Label Studio user.',
+        manual_parameters=[
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_INTEGER,
+                in_=openapi.IN_PATH,
+                description='User ID'),
+        ],
     ))
 class UserAPI(viewsets.ModelViewSet):
     serializer_class = UserSerializer
-    permission_required = all_permissions.organizations_view
+    permission_required = ViewClassPermission(
+        GET=all_permissions.organizations_view,
+        PUT=all_permissions.organizations_change,
+        POST=all_permissions.organizations_change,
+        PATCH=all_permissions.organizations_view,
+        DELETE=all_permissions.organizations_change,
+    )
+    http_method_names = ['get', 'post', 'head', 'patch', 'delete']
 
     def get_queryset(self):
         return User.objects.filter(organizations=self.request.user.active_organization)
 
     @swagger_auto_schema(auto_schema=None, methods=['delete', 'post'])
-    @action(detail=True, methods=['delete', 'post'])
+    @action(detail=True, methods=['delete', 'post'], permission_required=all_permissions.avatar_any)
     def avatar(self, request, pk):
         if request.method == 'POST':
             avatar = check_avatar(request.FILES)
@@ -161,7 +197,7 @@ class UserGetTokenAPI(APIView):
 @method_decorator(name='get', decorator=swagger_auto_schema(
         tags=['Users'],
         operation_summary='Retrieve my user',
-        operation_description='Retrieve details the account that you are using to access the API.'
+        operation_description='Retrieve details of the account that you are using to access the API.'
     ))
 class UserWhoAmIAPI(generics.RetrieveAPIView):
     parser_classes = (JSONParser, FormParser, MultiPartParser)

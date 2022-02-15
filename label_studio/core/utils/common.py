@@ -19,6 +19,7 @@ import traceback as tb
 import drf_yasg.openapi as openapi
 import contextlib
 import label_studio
+import re
 
 from django.db import models, transaction
 from django.utils.module_loading import import_string
@@ -36,7 +37,6 @@ from drf_yasg.inspectors import CoreAPICompatInspector, NotHandled
 from collections import defaultdict
 
 from base64 import b64encode
-from lockfile import LockFile
 from datetime import datetime
 from appdirs import user_cache_dir
 from functools import wraps
@@ -115,6 +115,8 @@ def custom_exception_handler(exc, context):
         exc_tb = tb.format_exc()
         logger.debug(exc_tb)
         response_data['detail'] = str(exc)
+        if not settings.DEBUG_MODAL_EXCEPTIONS:
+            exc_tb = 'Tracebacks disabled in settings'
         response_data['exc_info'] = exc_tb
         response = Response(status=status.HTTP_500_INTERNAL_SERVER_ERROR, data=response_data)
 
@@ -272,11 +274,19 @@ def timestamp_now():
 
 
 def find_first_one_to_one_related_field_by_prefix(instance, prefix):
+    if hasattr(instance, '_find_first_one_to_one_related_field_by_prefix_cache'):
+        return getattr(instance, '_find_first_one_to_one_related_field_by_prefix_cache')
+
+    result = None
     for field in instance._meta.get_fields():
         if issubclass(type(field), models.fields.related.OneToOneRel):
             attr_name = field.get_accessor_name()
-            if attr_name.startswith(prefix) and hasattr(instance, attr_name):
-                return getattr(instance, attr_name)
+            if re.match(prefix, attr_name) and hasattr(instance, attr_name):
+                result = getattr(instance, attr_name)
+                break
+
+    instance._find_first_one_to_one_related_field_by_prefix_cache = result
+    return result
 
 
 def start_browser(ls_url, no_browser):
@@ -287,7 +297,7 @@ def start_browser(ls_url, no_browser):
 
     browser_url = ls_url
     threading.Timer(2.5, lambda: webbrowser.open(browser_url)).start()
-    print('Start browser at URL: ' + browser_url)
+    logger.info('Start browser at URL: ' + browser_url)
 
 
 @contextlib.contextmanager
@@ -408,6 +418,7 @@ def collect_versions(force=False):
 
     # main pypi package
     result = {
+        'release': label_studio.__version__,
         'label-studio-os-package': {
             'version': label_studio.__version__,
             'short_version': '.'.join(label_studio.__version__.split('.')[:2]),
@@ -416,8 +427,7 @@ def collect_versions(force=False):
             'current_version_is_outdated': label_studio.__current_version_is_outdated__
         },
         # backend full git info
-        'label-studio-os-backend': version.get_git_commit_info(),
-        'release': label_studio.__version__
+        'label-studio-os-backend': version.get_git_commit_info()
     }
 
     # label studio frontend
@@ -584,3 +594,50 @@ def batch(iterable, n=1):
     l = len(iterable)
     for ndx in range(0, l, n):
         yield iterable[ndx : min(ndx + n, l)]
+
+
+def round_floats(o):
+    if isinstance(o, float):
+        return round(o, 2)
+    if isinstance(o, dict):
+        return {k: round_floats(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [round_floats(x) for x in o]
+    return o
+
+
+class temporary_disconnect_list_signal:
+    """ Temporarily disconnect a list of signals
+        Each signal tuple: (signal_type, signal_method, object)
+        Example:
+            with temporary_disconnect_list_signal(
+                [(signals.post_delete, update_is_labeled_after_removing_annotation, Annotation)]
+                ):
+                do_something()
+    """
+    def __init__(self, signals):
+        self.signals = signals
+
+    def __enter__(self):
+        for signal in self.signals:
+            sig = signal[0]
+            receiver = signal[1]
+            sender = signal[2]
+            dispatch_uid = signal[3] if len(signal) > 3 else None
+            sig.disconnect(
+                receiver=receiver,
+                sender=sender,
+                dispatch_uid=dispatch_uid
+            )
+
+    def __exit__(self, type_, value, traceback):
+        for signal in self.signals:
+            sig = signal[0]
+            receiver = signal[1]
+            sender = signal[2]
+            dispatch_uid = signal[3] if len(signal) > 3 else None
+            sig.connect(
+                receiver=receiver,
+                sender=sender,
+                dispatch_uid=dispatch_uid
+            )

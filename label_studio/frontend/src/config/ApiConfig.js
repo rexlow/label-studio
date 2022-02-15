@@ -50,6 +50,7 @@ export const API_CONFIG = {
     trainMLBackend: "POST:/ml/:pk/train",
     predictWithML: "POST:/ml/:pk/predict",
     modelVersions: "/projects/:pk/model-versions",
+    mlInteractive: "POST:/ml/:pk/interactive-annotating",
 
     // Export
     export: "/projects/:pk/export",
@@ -58,6 +59,14 @@ export const API_CONFIG = {
 
     // Version
     version: '/version',
+
+    // Webhook
+    webhooks: "/webhooks",
+    webhook: "/webhooks/:pk",
+    updateWebhook: "PATCH:/webhooks/:pk",
+    createWebhook: "POST:/webhooks",
+    deleteWebhook: "DELETE:/webhooks/:pk",
+    webhooksInfo: "/webhooks/info",
   },
   alwaysExpectJSON: false,
 };

@@ -4,6 +4,7 @@ import time
 import logging
 import drf_yasg.openapi as openapi
 import json
+import mimetypes
 
 from django.conf import settings
 from django.db import transaction
@@ -16,12 +17,17 @@ from rest_framework.permissions import IsAuthenticated
 from ranged_fileresponse import RangedFileResponse
 
 from core.permissions import all_permissions, ViewClassPermission
-from core.utils.common import bool_from_request, retry_database_locked
+from core.utils.common import retry_database_locked
+from core.utils.params import list_of_strings_from_request, bool_from_request
+from core.utils.exceptions import LabelStudioValidationErrorSentryIgnored
 from projects.models import Project
-from tasks.models import Task
+from tasks.models import Task, Prediction
 from .uploader import load_tasks
-from .serializers import ImportApiSerializer, FileUploadSerializer
+from .serializers import ImportApiSerializer, FileUploadSerializer, PredictionSerializer
 from .models import FileUpload
+
+from webhooks.utils import emit_webhooks_for_instance
+from webhooks.models import WebhookAction
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +96,13 @@ task_create_response_scheme = {
 @method_decorator(name='post', decorator=swagger_auto_schema(
         tags=['Import'],
         responses=task_create_response_scheme,
+        manual_parameters=[
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_INTEGER,
+                in_=openapi.IN_PATH,
+                description='A unique integer value identifying this project.'),
+        ],
         operation_summary='Import tasks',
         operation_description="""
             Import data as labeling tasks in bulk using this API endpoint. You can use this API endpoint to import multiple tasks. 
@@ -136,7 +149,7 @@ task_create_response_scheme = {
             You can also provide a URL to a file with labeling tasks. Supported file formats are the same as in option 2.
             
             ```bash
-            curl -H 'Authorization: Token abc123' \\
+            curl -H 'Content-Type: application/json' -H 'Authorization: Token abc123' \\
             -X POST '{host}/api/projects/1/import' \\
             --data '[{{"url": "http://example.com/test1.csv"}}, {{"url": "http://example.com/test2.csv"}}]'
             ```
@@ -165,17 +178,38 @@ class ImportAPI(generics.CreateAPIView):
     def _save(self, tasks):
         serializer = self.get_serializer(data=tasks, many=True)
         serializer.is_valid(raise_exception=True)
-        return serializer.save(project_id=self.kwargs['pk']), serializer
+        task_instances = serializer.save(project_id=self.kwargs['pk'])
+        project = generics.get_object_or_404(Project.objects.for_user(self.request.user), pk=self.kwargs['pk'])
+        emit_webhooks_for_instance(self.request.user.active_organization, project, WebhookAction.TASKS_CREATED, task_instances)
+        return task_instances, serializer
+
+    def _reformat_predictions(self, tasks, preannotated_from_fields):
+        new_tasks = []
+        for task in tasks:
+            if 'data' in task:
+                task = task['data']
+            predictions = [{'result': task.pop(field)} for field in preannotated_from_fields]
+            new_tasks.append({
+                'data': task,
+                'predictions': predictions
+            })
+        return new_tasks
 
     def create(self, request, *args, **kwargs):
         start = time.time()
         commit_to_project = bool_from_request(request.query_params, 'commit_to_project', True)
+        return_task_ids = bool_from_request(request.query_params, 'return_task_ids', False)
+        preannotated_from_fields = list_of_strings_from_request(request.query_params, 'preannotated_from_fields', None)
 
         # check project permissions
         project = generics.get_object_or_404(Project.objects.for_user(self.request.user), pk=self.kwargs['pk'])
 
         # upload files from request, and parse all tasks
         parsed_data, file_upload_ids, could_be_tasks_lists, found_formats, data_columns = load_tasks(request, project)
+
+        if preannotated_from_fields:
+            # turn flat task JSONs {"column1": value, "column2": value} into {"data": {"column1"..}, "predictions": [{..."column2"}]  # noqa
+            parsed_data = self._reformat_predictions(parsed_data, preannotated_from_fields)
 
         if commit_to_project:
             # Immediately create project tasks and update project states and counters
@@ -204,7 +238,7 @@ class ImportAPI(generics.CreateAPIView):
 
         duration = time.time() - start
 
-        return Response({
+        response = {
             'task_count': task_count,
             'annotation_count': annotation_count,
             'prediction_count': prediction_count,
@@ -213,7 +247,41 @@ class ImportAPI(generics.CreateAPIView):
             'could_be_tasks_list': could_be_tasks_lists,
             'found_formats': found_formats,
             'data_columns': data_columns
-        }, status=status.HTTP_201_CREATED)
+        }
+        if return_task_ids:
+            response['task_ids'] = [task.id for task in tasks]
+
+        return Response(response, status=status.HTTP_201_CREATED)
+
+
+# Import
+class ImportPredictionsAPI(generics.CreateAPIView):
+    permission_required = all_permissions.projects_change
+    parser_classes = (JSONParser, MultiPartParser, FormParser)
+    serializer_class = PredictionSerializer
+    queryset = Project.objects.all()
+    swagger_schema = None  # TODO: create API schema
+
+    def create(self, request, *args, **kwargs):
+        # check project permissions
+        project = self.get_object()
+        tasks_ids = set(Task.objects.filter(project=project).values_list('id', flat=True))
+        logger.debug(f'Importing {len(self.request.data)} predictions to project {project} with {len(tasks_ids)} tasks')
+        predictions = []
+        for item in self.request.data:
+            if item.get('task') not in tasks_ids:
+                raise LabelStudioValidationErrorSentryIgnored(
+                    f'{item} contains invalid "task" field: corresponding task ID couldn\'t be retrieved '
+                    f'from project {project} tasks')
+            predictions.append(Prediction(
+                task_id=item['task'],
+                result=Prediction.prepare_prediction_result(item.get('result'), project),
+                score=item.get('score'),
+                model_version=item.get('model_version', 'undefined')
+            ))
+        predictions_obj = Prediction.objects.bulk_create(predictions, batch_size=settings.BATCH_SIZE)
+
+        return Response({'created': len(predictions_obj)}, status=status.HTTP_201_CREATED)
 
 
 class TasksBulkCreateAPI(ImportAPI):
@@ -228,10 +296,22 @@ class ReImportAPI(ImportAPI):
     def create(self, request, *args, **kwargs):
         start = time.time()
         files_as_tasks_list = bool_from_request(request.data, 'files_as_tasks_list', True)
+        file_upload_ids = self.request.data.get('file_upload_ids')
 
         # check project permissions
         project = generics.get_object_or_404(Project.objects.for_user(self.request.user), pk=self.kwargs['pk'])
-        file_upload_ids = self.request.data.get('file_upload_ids')
+        
+        if not file_upload_ids:
+            return Response({
+                'task_count': 0,
+                'annotation_count': 0,
+                'prediction_count': 0,
+                'duration': 0,
+                'file_upload_ids': [],
+                'found_formats': {},
+                'data_columns': []
+            }, status=status.HTTP_204_NO_CONTENT)
+
         tasks, found_formats, data_columns = FileUpload.load_tasks_from_uploaded_files(
             project, file_upload_ids,  files_as_tasks_list=files_as_tasks_list)
 
@@ -326,6 +406,7 @@ class FileUploadListAPI(generics.mixins.ListModelMixin,
             raise ValueError('"file_upload_ids" parameter must be a list of integers')
         return Response({'deleted': deleted}, status=status.HTTP_200_OK)
 
+
 @method_decorator(name='get', decorator=swagger_auto_schema(
         tags=['Import'],
         operation_summary='Get file upload',
@@ -370,6 +451,15 @@ class UploadedFileResponse(generics.RetrieveAPIView):
         filename = kwargs['filename']
         file = settings.UPLOAD_DIR + ('/' if not settings.UPLOAD_DIR.endswith('/') else '') + filename
         logger.debug(f'Fetch uploaded file by user {request.user} => {file}')
-        file_upload = FileUpload.objects.get(file=file)
+        file_upload = FileUpload.objects.filter(file=file).last()
 
-        return RangedFileResponse(request, open(file_upload.file.path, mode='rb'))
+        if not file_upload.has_permission(request.user):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        file = file_upload.file
+        if file.storage.exists(file.name):
+            content_type, encoding = mimetypes.guess_type(str(file.name))
+            content_type = content_type or 'application/octet-stream'
+            return RangedFileResponse(request, file.open(mode='rb'), content_type=content_type)
+        else:
+            return Response(status=status.HTTP_404_NOT_FOUND)

@@ -7,7 +7,7 @@ import os
 from rest_framework import generics
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
-from rest_framework.exceptions import NotFound
+from rest_framework.exceptions import NotFound, PermissionDenied
 from drf_yasg import openapi as openapi
 from drf_yasg.utils import swagger_auto_schema
 
@@ -35,6 +35,7 @@ class ImportStorageListAPI(generics.ListCreateAPIView):
 
 class ImportStorageDetailAPI(generics.RetrieveUpdateDestroyAPIView):
     """RUD storage by pk specified in URL"""
+
     parser_classes = (JSONParser, FormParser, MultiPartParser)
     serializer_class = ImportStorageSerializer
     permission_required = all_permissions.projects_change
@@ -59,6 +60,7 @@ class ExportStorageListAPI(generics.ListCreateAPIView):
 
 class ExportStorageDetailAPI(generics.RetrieveUpdateDestroyAPIView):
     """RUD storage by pk specified in URL"""
+
     parser_classes = (JSONParser, FormParser, MultiPartParser)
     serializer_class = ExportStorageSerializer
     permission_required = all_permissions.projects_change
@@ -87,15 +89,38 @@ class ImportStorageSyncAPI(generics.GenericAPIView):
         return Response(self.serializer_class(storage).data)
 
 
+class ExportStorageSyncAPI(generics.GenericAPIView):
+
+    parser_classes = (JSONParser, FormParser, MultiPartParser)
+    permission_required = all_permissions.projects_change
+    serializer_class = ExportStorageSerializer
+
+    def get_queryset(self):
+        ExportStorageClass = self.serializer_class.Meta.model
+        return ExportStorageClass.objects.all()
+
+    def post(self, request, *args, **kwargs):
+        storage = self.get_object()
+        # check connectivity & access, raise an exception if not satisfied
+        storage.validate_connection()
+        storage.sync()
+        storage.refresh_from_db()
+        return Response(self.serializer_class(storage).data)
+
+
 class StorageValidateAPI(generics.CreateAPIView):
     parser_classes = (JSONParser, FormParser, MultiPartParser)
     permission_required = all_permissions.projects_change
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        instance = None
+        storage_id = request.data.get('id')
+        if storage_id:
+            instance = generics.get_object_or_404(self.serializer_class.Meta.model.objects.all(), pk=storage_id)
+            if not instance.has_permission(request.user):
+                raise PermissionDenied()
+        serializer = self.get_serializer(instance=instance, data=request.data)
         serializer.is_valid(raise_exception=True)
-        storage = self.serializer_class.Meta.model(**serializer.validated_data)
-        storage.validate_connection()
         return Response()
 
 

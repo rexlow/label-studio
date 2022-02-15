@@ -13,16 +13,19 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework import generics, viewsets
 from rest_framework.response import Response
+from rest_framework.exceptions import PermissionDenied as DRFPermissionDenied
 
 from core.utils.common import get_object_with_check_and_log, DjangoFilterDescriptionInspector
 from core.permissions import all_permissions, ViewClassPermission
 
 from tasks.models import Task, Annotation, Prediction, AnnotationDraft
-from core.utils.common import bool_from_request
+from core.utils.common import bool_from_request, int_from_request
 from tasks.serializers import (
     TaskSerializer, AnnotationSerializer, TaskSimpleSerializer, PredictionSerializer,
     TaskWithAnnotationsAndPredictionsAndDraftsSerializer, AnnotationDraftSerializer, PredictionQuerySerializer)
 from projects.models import Project
+from webhooks.utils import api_webhook, api_webhook_for_delete, emit_webhooks_for_instance
+from webhooks.models import WebhookAction
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,14 @@ logger = logging.getLogger(__name__)
 class TaskListAPI(generics.ListCreateAPIView):
     parser_classes = (JSONParser, FormParser, MultiPartParser)
     queryset = Task.objects.all()
+    permission_required = ViewClassPermission(
+        GET=all_permissions.tasks_view,
+        POST=all_permissions.tasks_create,
+    )
     serializer_class = TaskSerializer
+
+    def filter_queryset(self, queryset):
+        return queryset.filter(project__organization=self.request.user.active_organization)
 
     @swagger_auto_schema(auto_schema=None)
     def get(self, request, *args, **kwargs):
@@ -48,8 +58,12 @@ class TaskListAPI(generics.ListCreateAPIView):
             context['project'] = generics.get_object_or_404(Project, pk=project_id)
         return context
 
-    def post(self, request, *args, **kwargs):
-        return super(TaskListAPI, self).post(request, *args, **kwargs)
+    def perform_create(self, serializer):
+        project_id = self.request.data.get('project')
+        generics.get_object_or_404(Project, pk=project_id)
+        project = generics.get_object_or_404(Project, pk=project_id)
+        instance = serializer.save(project=project)
+        emit_webhooks_for_instance(self.request.user.active_organization, project, WebhookAction.TASKS_CREATED, [instance])
 
 
 @method_decorator(name='get', decorator=swagger_auto_schema(
@@ -59,26 +73,50 @@ class TaskListAPI(generics.ListCreateAPIView):
         Get task data, metadata, annotations and other attributes for a specific labeling task by task ID.
         """,
         manual_parameters=[
-            openapi.Parameter(name='proxy', type=openapi.TYPE_BOOLEAN, in_=openapi.IN_QUERY,
-                          description='Use the proxy parameter inline for credential access to task data')
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_STRING,
+                in_=openapi.IN_PATH,
+                description='Task ID'
+            ),
         ]))
 @method_decorator(name='patch', decorator=swagger_auto_schema(
         tags=['Tasks'],
         operation_summary='Update task',
         operation_description='Update the attributes of an existing labeling task.',
+        manual_parameters=[
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_STRING,
+                in_=openapi.IN_PATH,
+                description='Task ID'
+            ),
+        ],
         request_body=TaskSimpleSerializer))
 @method_decorator(name='delete', decorator=swagger_auto_schema(
         tags=['Tasks'],
         operation_summary='Delete task',
         operation_description='Delete a task in Label Studio. This action cannot be undone!',
+        manual_parameters=[
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_STRING,
+                in_=openapi.IN_PATH,
+                description='Task ID'
+            ),
+        ],
         ))
 class TaskAPI(generics.RetrieveUpdateDestroyAPIView):
-    """
-
-
-    """
     parser_classes = (JSONParser, FormParser, MultiPartParser)
-    queryset = Task.objects.all()
+    permission_required = ViewClassPermission(
+        GET=all_permissions.tasks_view,
+        PUT=all_permissions.tasks_change,
+        PATCH=all_permissions.tasks_change,
+        DELETE=all_permissions.tasks_delete,
+    )
+
+    def get_queryset(self):
+        return Task.objects.filter(project__organization=self.request.user.active_organization)
 
     def get_serializer_class(self):
         # GET => task + annotations + predictions + drafts
@@ -91,17 +129,17 @@ class TaskAPI(generics.RetrieveUpdateDestroyAPIView):
     
     def retrieve(self, request, *args, **kwargs):
         task = self.get_object()
+        project = task.project
 
         # call machine learning api and format response
-        if task.project.evaluate_predictions_automatically:
+        if project.evaluate_predictions_automatically:
             for ml_backend in task.project.ml_backends.all():
-                ml_backend.predict_one_task(task)
+                ml_backend.predict_tasks([task])
 
         result = self.get_serializer(task).data
 
         # use proxy inlining to task data (for credential access)
-        proxy = bool_from_request(request.GET, 'proxy', True)
-        result['data'] = task.resolve_uri(result['data'], proxy=proxy)
+        result['data'] = task.resolve_uri(result['data'], project)
         return Response(result)
 
     def get(self, request, *args, **kwargs):
@@ -110,12 +148,14 @@ class TaskAPI(generics.RetrieveUpdateDestroyAPIView):
     def patch(self, request, *args, **kwargs):
         return super(TaskAPI, self).patch(request, *args, **kwargs)
 
+    @api_webhook_for_delete(WebhookAction.TASKS_DELETED)
     def delete(self, request, *args, **kwargs):
         return super(TaskAPI, self).delete(request, *args, **kwargs)
 
     @swagger_auto_schema(auto_schema=None)
     def put(self, request, *args, **kwargs):
         return super(TaskAPI, self).put(request, *args, **kwargs)
+
 
 @method_decorator(name='get', decorator=swagger_auto_schema(
         tags=['Annotations'],
@@ -162,13 +202,16 @@ class AnnotationAPI(generics.RetrieveUpdateDestroyAPIView):
     def get(self, request, *args, **kwargs):
         return super(AnnotationAPI, self).get(request, *args, **kwargs)
 
+    @api_webhook(WebhookAction.ANNOTATION_UPDATED)
     @swagger_auto_schema(auto_schema=None)
     def put(self, request, *args, **kwargs):
         return super(AnnotationAPI, self).put(request, *args, **kwargs)
 
+    @api_webhook(WebhookAction.ANNOTATION_UPDATED)
     def patch(self, request, *args, **kwargs):
         return super(AnnotationAPI, self).patch(request, *args, **kwargs)
 
+    @api_webhook_for_delete(WebhookAction.ANNOTATIONS_DELETED)
     def delete(self, request, *args, **kwargs):
         return super(AnnotationAPI, self).delete(request, *args, **kwargs)
 
@@ -177,11 +220,40 @@ class AnnotationAPI(generics.RetrieveUpdateDestroyAPIView):
         tags=['Annotations'],
         operation_summary='Get all task annotations',
         operation_description='List all annotations for a task.',
+        manual_parameters=[
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_INTEGER,
+                in_=openapi.IN_PATH,
+                description='Task ID'),
+        ],
         ))
 @method_decorator(name='post', decorator=swagger_auto_schema(
         tags=['Annotations'],
         operation_summary='Create annotation',
-        operation_description='Add annotations to a task like an annotator does.',
+        operation_description="""
+        Add annotations to a task like an annotator does. The content of the result field depends on your 
+        labeling configuration. For example, send the following data as part of your POST 
+        request to send an empty annotation with the ID of the user who completed the task:
+        
+        ```json
+        {
+        "result": {},
+        "was_cancelled": true,
+        "ground_truth": true,
+        "lead_time": 0,
+        "task": 0
+        "completed_by": 123
+        } 
+        ```
+        """,
+        manual_parameters=[
+            openapi.Parameter(
+                name='id',
+                type=openapi.TYPE_INTEGER,
+                in_=openapi.IN_PATH,
+                description='Task ID'),
+        ],
         request_body=AnnotationSerializer
         ))
 class AnnotationsListAPI(generics.ListCreateAPIView):
@@ -196,6 +268,7 @@ class AnnotationsListAPI(generics.ListCreateAPIView):
     def get(self, request, *args, **kwargs):
         return super(AnnotationsListAPI, self).get(request, *args, **kwargs)
 
+    @api_webhook(WebhookAction.ANNOTATION_CREATED)
     def post(self, request, *args, **kwargs):
         return super(AnnotationsListAPI, self).post(request, *args, **kwargs)
 
@@ -207,12 +280,8 @@ class AnnotationsListAPI(generics.ListCreateAPIView):
         task = get_object_with_check_and_log(self.request, Task, pk=self.kwargs['pk'])
         # annotator has write access only to annotations and it can't be checked it after serializer.save()
         user = self.request.user
-        # Release task if it has been taken at work (it should be taken by the same user, or it makes sentry error
-        logger.debug(f'User={user} releases task={task}')
-        task.release_lock(user)
 
         # updates history
-        update_id = self.request.user.id
         result = ser.validated_data.get('result')
         extra_args = {'task_id': self.kwargs['pk']}
 
@@ -243,6 +312,10 @@ class AnnotationsListAPI(generics.ListCreateAPIView):
         logger.debug(f'Save activity for user={self.request.user}')
         self.request.user.activity_at = timezone.now()
         self.request.user.save()
+
+        # Release task if it has been taken at work (it should be taken by the same user, or it makes sentry error
+        logger.debug(f'User={user} releases task={task}')
+        task.release_lock(user)
 
         # if annotation created from draft - remove this draft
         draft_id = self.request.data.get('draft_id')
@@ -298,24 +371,64 @@ class AnnotationDraftAPI(generics.RetrieveUpdateDestroyAPIView):
 
 
 @method_decorator(name='list', decorator=swagger_auto_schema(
-    tags=['Predictions'], operation_summary="List predictions", 
+    tags=['Predictions'],
+    operation_summary="List predictions",
     filter_inspectors=[DjangoFilterDescriptionInspector],
-    operation_description="List all predictions."))
+    operation_description="List all predictions and their IDs.",
+))
 @method_decorator(name='create', decorator=swagger_auto_schema(
-    tags=['Predictions'], operation_summary="Create prediction",
-    operation_description="Create a prediction."))
+    tags=['Predictions'],
+    operation_summary="Create prediction",
+    operation_description="Create a prediction for a specific task.",
+))
 @method_decorator(name='retrieve', decorator=swagger_auto_schema(
-    tags=['Predictions'], operation_summary="Get prediction",
-    operation_description="Get all predictions."))
+    tags=['Predictions'],
+    operation_summary="Get prediction details",
+    operation_description="Get details about a specific prediction by its ID.",
+    manual_parameters=[
+        openapi.Parameter(
+            name='id',
+            type=openapi.TYPE_INTEGER,
+            in_=openapi.IN_PATH,
+            description='Prediction ID'),
+    ],
+))
 @method_decorator(name='update', decorator=swagger_auto_schema(
-    tags=['Predictions'], operation_summary="Put prediction",
-    operation_description="Overwrite prediction data."))
+    tags=['Predictions'],
+    operation_summary="Put prediction",
+    operation_description="Overwrite prediction data by prediction ID.",
+    manual_parameters=[
+        openapi.Parameter(
+            name='id',
+            type=openapi.TYPE_INTEGER,
+            in_=openapi.IN_PATH,
+            description='Prediction ID'),
+    ],
+))
 @method_decorator(name='partial_update', decorator=swagger_auto_schema(
-    tags=['Predictions'], operation_summary="Update prediction",
-    operation_description="Update prediction data."))
+    tags=['Predictions'],
+    operation_summary="Update prediction",
+    operation_description="Update prediction data by prediction ID.",
+    manual_parameters=[
+        openapi.Parameter(
+            name='id',
+            type=openapi.TYPE_INTEGER,
+            in_=openapi.IN_PATH,
+            description='Prediction ID'),
+    ],
+))
 @method_decorator(name='destroy', decorator=swagger_auto_schema(
-    tags=['Predictions'], operation_summary="Delete prediction",
-    operation_description="Delete a prediction."))
+    tags=['Predictions'],
+    operation_summary="Delete prediction",
+    operation_description="Delete a prediction by prediction ID.",
+    manual_parameters=[
+        openapi.Parameter(
+            name='id',
+            type=openapi.TYPE_INTEGER,
+            in_=openapi.IN_PATH,
+            description='Prediction ID'),
+    ],
+))
 class PredictionAPI(viewsets.ModelViewSet):
     serializer_class = PredictionSerializer
     permission_required = all_permissions.predictions_any

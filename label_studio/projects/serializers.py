@@ -28,7 +28,8 @@ class ProjectSerializer(DynamicFieldsMixin, serializers.ModelSerializer):
                                                               'skipped_annotations_number and ground_truth_number.')
     total_predictions_number = serializers.IntegerField(default=None, read_only=True,
                                                     help_text='Total predictions number in project including '
-                                                              'skipped_annotations_number and ground_truth_numberuseful_annotation_number.')
+                                                              'skipped_annotations_number, ground_truth_number, and '
+                                                              'useful_annotation_number.')
     useful_annotation_number = serializers.IntegerField(default=None, read_only=True,
                                                      help_text='Useful annotation number in project not including '
                                                                'skipped_annotations_number and ground_truth_number. '
@@ -80,7 +81,7 @@ class ProjectSerializer(DynamicFieldsMixin, serializers.ModelSerializer):
                   'total_annotations_number', 'total_predictions_number', 'sampling', 'show_ground_truth_first',
                   'show_overlap_first', 'overlap_cohort_percentage', 'task_data_login', 'task_data_password',
                   'control_weights', 'parsed_label_config', 'evaluate_predictions_automatically',
-                  'config_has_control_tags']
+                  'config_has_control_tags', 'skip_queue', 'reveal_preannotations_interactively']
 
     def validate_label_config(self, value):
         if self.instance is None:
@@ -99,7 +100,7 @@ class ProjectOnboardingSerializer(serializers.ModelSerializer):
 
 
 class ProjectLabelConfigSerializer(serializers.Serializer):
-    label_config = serializers.CharField()
+    label_config = serializers.CharField(help_text=Project.label_config.field.help_text)
 
     def validate_label_config(self, config):
         Project.validate_label_config(config)

@@ -47,6 +47,21 @@ stages:
         json:
           project_pk: id
       status_code: 201
+  - id: create_project_image
+    name: stage
+    request:
+      data:
+        is_published: true
+        label_config: <View><Image name="image" value="$image_url"/><Choices name="label"
+          toName="image"><Choice value="pos"/><Choice value="neg"/></Choices></View>
+        title: test_project_image_label_config
+      method: POST
+      url: '{django_live_url}/api/projects'
+    response:
+      save:
+        json:
+          project_pk: id
+      status_code: 201
   - id: get_my_user
     name: Get my user
     request:
@@ -71,4 +86,25 @@ stages:
       save:
         json:
           task_pk: id
+      status_code: 201
+  - id: create_annotation
+    name: create_annotation
+    request:
+      headers:
+        content-type: application/json
+      json:
+        lead_time: 12.34
+        result:
+        - from_name: label
+          to_name: text
+          type: choices
+          value:
+            choices:
+            - pos
+      method: POST
+      url: '{django_live_url}/api/tasks/{task_pk}/annotations'
+    response:
+      save:
+        json:
+          annotation_pk: id
       status_code: 201
